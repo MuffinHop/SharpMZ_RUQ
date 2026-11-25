@@ -1,0 +1,14 @@
+# Sharp MZ - Raster Under Question / HBlank Binary Search
+
+
+Currently only for Sharp MZ-800's 800-graphics mode, but I'll add support for other Sharp MZ platforms soon.
+
+Atari ST scene calls this Raster Under Question but I think a better descriptive name would be HBlank Binary Search. This is useful for ~pixel precise actions on screen.
+
+
+If CKSW bit is off, the scanline cycles aren't perfectly matching CPU cycles so the border wobble just a bit. 227.2 T
+![CKSW bit is off in this image and it causes the border effect to be slightly unstable](CKSW_off_MZ800.png "CKSW off")
+
+
+If CKSW bit is on, the scanline cycles are perfectly matching CPU cycles, border is rock solid. 224 T
+![CKSW bit is on in this image and it causes the border effect to be rock solid](CKSW_on_MZ800.png "CKSW on")

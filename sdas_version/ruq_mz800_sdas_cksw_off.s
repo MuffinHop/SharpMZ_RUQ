@@ -1,0 +1,417 @@
+; Raster Under Question also known as HBlank Binary Search lock as macros
+; Atari scene calls it RUQ, I'd prefer to just call it HBBS
+; tl;dr if you are doing cycle precise effects you need this and not conditional jumps or interrupts.
+; jr cc, ret cc, call cc and djnz take a different time when taken than when not
+; (jp cc is always 10 T). The lock below uses no conditional instruction at all.
+; Interrupts jitter too: the CPU first finishes whatever instruction it is running.
+;
+; THIS VARIANT: CKSW OFF (port CFh with B = 07h, bit 7 = 0)
+; Line = 1136 pixel clocks = 227.2 T. binary_search_init writes CKSW for you.
+; CKSW is looked at once per line: do not change it during a lock, and if you
+; change it later, let two lines pass before the next binary_search_sync.
+; Using the other CKSW setting breaks the lock: use the other file.
+;
+; Result: up to 1 T total spread
+; This requires you to clobber some of your memory a bit due to use of JP (HL)
+; note for anyone modifying this: JP (HL) means PC = HL, NOT PC = (HL)
+
+; this is for the sdasz80 assembler (SDCC); "." is the current address
+; this is for MZ-800, in MZ-800 graphics mode, if you use MZ-700 mode check the other sources please.
+
+; if you want to throw kudos at MuffinHop of Ivory Labs, that'd be cool, but not required
+
+
+; Needs: interrupts off, RAM at offsets 00h-D1h of page STUB_PAGE, SP pointing at RAM,
+; code in RAM without wait states.  Clobbers AF, BC, DE, HL, IX, IY.
+
+; delay lines, these waste CPU time to get accurate timing for RUQ/HBBS
+
+; USE THIS FOR GOOD, NOT EVIL
+
+STUB_PAGE = 0x00                ; high byte of the stub address: HL uses STUB_PAGE:00h-D1h.
+                                ; Change it if you need that memory (interrupt vectors etc).
+                                ; 0000h-1FFFh is ROM after reset: bank in RAM before use.
+PORT_VIDEO_STATUS = 0xCE        ; Video status port
+RETRACE_MASK = 0x20             ; bit5: 0 during horizontal retrace, 1 during border 
+        .macro wait4
+        nop
+        .endm
+
+        .macro wait6
+        inc de
+        .endm
+
+        .macro wait8
+        nop
+        nop
+        .endm
+
+        .macro wait11
+        nop
+        cp (hl)
+        .endm
+
+        .macro wait21
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        .endm
+
+        .macro wait141
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        inc de
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        .endm
+
+        .macro wait143
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        inc de
+        cp (hl)
+        cp (hl)
+        ld a, r
+        .endm
+
+        .macro wait150
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        inc de
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        ld a, r
+        .endm
+
+        .macro wait151
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        ld a, r
+        .endm
+
+        .macro wait155
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        inc de
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        .endm
+
+        .macro wait157
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        inc de
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        cp (hl)
+        ld a, r
+        .endm
+
+        .macro wait160
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        nop
+        nop
+        .endm
+
+; //////////////// INITIALIZATION CODE AT THE BEGINNING OF THE PROGRAM ////////////////
+; This will fragment your memory around 0x0000(or other STUB_PAGE) but if you want pixel precision, it's worth it.
+; No need to rely on conditionals: jr cc takes 12 T or 7 T depending on the outcome.
+; (LDIR runs once here, outside the timed code.)
+        .macro binary_search_init
+        ld bc, #0x07CF                          ; CKSW off: 227.2 T lines
+        ld a, #0x00
+        out (c), a
+
+        ld hl, #binary_search_stage1_late
+        ld de, #(0x00 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage1_late_end - binary_search_stage1_late)
+        ldir
+
+        ld hl, #binary_search_stage1_early
+        ld de, #(0x10 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage1_early_end - binary_search_stage1_early)
+        ldir
+
+        ld hl, #binary_search_stage2_late
+        ld de, #(0x20 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage2_late_end - binary_search_stage2_late)
+        ldir
+
+        ld hl, #binary_search_stage2_early
+        ld de, #(0x30 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage2_early_end - binary_search_stage2_early)
+        ldir
+
+        ld hl, #binary_search_stage3_late
+        ld de, #(0x50 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage3_late_end - binary_search_stage3_late)
+        ldir
+
+        ld hl, #binary_search_stage3_early
+        ld de, #(0x60 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage3_early_end - binary_search_stage3_early)
+        ldir
+
+        ld hl, #binary_search_stage4_late
+        ld de, #(0x70 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage4_late_end - binary_search_stage4_late)
+        ldir
+
+        ld hl, #binary_search_stage4_early
+        ld de, #(0x78 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage4_early_end - binary_search_stage4_early)
+        ldir
+
+        ld hl, #binary_search_stage5_late
+        ld de, #(0x80 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage5_late_end - binary_search_stage5_late)
+        ldir
+
+        ld hl, #binary_search_stage5_early
+        ld de, #(0x88 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage5_early_end - binary_search_stage5_early)
+        ldir
+
+        ld hl, #binary_search_stage6_late
+        ld de, #(0x90 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage6_late_end - binary_search_stage6_late)
+        ldir
+
+        ld hl, #binary_search_stage6_early
+        ld de, #(0x98 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_stage6_early_end - binary_search_stage6_early)
+        ldir
+
+        ld hl, #binary_search_poll1_low
+        ld de, #(0xA0 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_poll1_low_end - binary_search_poll1_low)
+        ldir
+
+        ld hl, #binary_search_poll1_high
+        ld de, #(0xB0 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_poll1_high_end - binary_search_poll1_high)
+        ldir
+
+        ld hl, #binary_search_poll2_low
+        ld de, #(0xC0 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_poll2_low_end - binary_search_poll2_low)
+        ldir
+
+        ld hl, #binary_search_poll2_high
+        ld de, #(0xD0 + (STUB_PAGE << 8))
+        ld bc, #(binary_search_poll2_high_end - binary_search_poll2_high)
+        ldir
+        .endm
+
+
+        .macro binary_search_sync
+        ld bc, #PORT_VIDEO_STATUS
+        ld h, #STUB_PAGE                        ; all stubs are in this page
+        ld ix, #. + 17                          ; Wait for retrace end, IX = way out
+        ld iy, #. + 4                           ; IY = top of this polling loop
+        in a, (c)
+        and #RETRACE_MASK
+        rra
+        add a, #0xA0
+        ld l, a
+        jp (hl)                                 ; one round: 46 T
+        ld ix, #. + 17                          ; then for retrace start IX = way out
+        ld iy, #. + 4                           ; IY = top of this polling loop
+        in a, (c)
+        and #RETRACE_MASK
+        rra
+        add a, #0xC0
+        ld l, a
+        jp (hl)                                 ; one round: 46 T
+; Stage 1: sample 206 T after the previous one; early path adds 21 T
+        wait160
+        in a, (c)
+        and #RETRACE_MASK
+        rra
+        add a, #0x00
+        ld l, a
+        ld h, #STUB_PAGE
+        ld ix, #. + 5                           ; where the stub returns to
+        jp (hl)                                 ; to 0x00 + (STUB_PAGE << 8) (late) or 0x10 + (STUB_PAGE << 8) (early)
+; Stage 2: sample 217 T after the previous one; early path adds 11 T
+        wait150
+        in a, (c)
+        and #RETRACE_MASK
+        rra
+        add a, #0x20
+        ld l, a
+        ld h, #STUB_PAGE
+        ld ix, #. + 5                           ; where the stub returns to
+        jp (hl)                                 ; to 0x20 + (STUB_PAGE << 8) (late) or 0x30 + (STUB_PAGE << 8) (early)
+; Stage 3: sample 222 T after the previous one; early path adds 6 T
+        wait155
+        in a, (c)
+        and #RETRACE_MASK
+        rra
+        add a, #0x50
+        ld l, a
+        ld h, #STUB_PAGE
+        ld ix, #. + 5                           ; where the stub returns to
+        jp (hl)                                 ; to 0x50 + (STUB_PAGE << 8) (late) or 0x60 + (STUB_PAGE << 8) (early)
+; Stage 4: sample 224 T after the previous one; early path adds 3 T
+        wait157
+        in a, (c)
+        and #RETRACE_MASK
+        rrca
+        rrca
+        add a, #0x70
+        ld l, a
+        ld h, #STUB_PAGE
+        ld ix, #. + 5                           ; where the stub returns to
+        jp (hl)                                 ; to 0x70 + (STUB_PAGE << 8) (late) or 0x78 + (STUB_PAGE << 8) (early)
+; Stage 5: sample 226 T after the previous one; early path adds 2 T
+        wait151
+        in a, (c)
+        and #RETRACE_MASK
+        rrca
+        rrca
+        add a, #0x80
+        ld l, a
+        ld h, #STUB_PAGE
+        ld ix, #. + 9                           ; late entry: just below
+        ld iy, #. + 31                          ; early entry: second copy
+        jp (hl)                                 ; to 0x80 + (STUB_PAGE << 8) (late) or 0x88 + (STUB_PAGE << 8) (early)
+; Stage 6: sample 226 T after the previous one; early path adds 1 T (late copy)
+        wait141
+        in a, (c)
+        and #RETRACE_MASK
+        rrca
+        rrca
+        add a, #0x90
+        ld l, a
+        ld h, #STUB_PAGE
+        ld ix, #. + 32                          ; skip the early copy
+        jp (hl)                                 ; to 0x90 + (STUB_PAGE << 8) (late) or 0x98 + (STUB_PAGE << 8) (early)
+; Stage 6: early copy, its wait is 2 T longer
+        wait143
+        in a, (c)
+        and #RETRACE_MASK
+        rrca
+        rrca
+        add a, #0x90
+        ld l, a
+        ld h, #STUB_PAGE
+        ld ix, #. + 5                           ; where the stub returns to
+        jp (hl)                                 ; to 0x90 + (STUB_PAGE << 8) (late) or 0x98 + (STUB_PAGE << 8) (early)
+        .endm
+
+
+
+;;; Binary search stubs (copied to low RAM). DATA: place where execution never runs into it.
+; 0x00 + (STUB_PAGE << 8)
+binary_search_stage1_late:
+        jp (ix)
+binary_search_stage1_late_end:
+; 0x10 + (STUB_PAGE << 8): +21 T
+binary_search_stage1_early:
+        wait21
+        jp (ix)
+binary_search_stage1_early_end:
+; 0x20 + (STUB_PAGE << 8)
+binary_search_stage2_late:
+        jp (ix)
+binary_search_stage2_late_end:
+; 0x30 + (STUB_PAGE << 8): +11 T
+binary_search_stage2_early:
+        wait11
+        jp (ix)
+binary_search_stage2_early_end:
+; 0x50 + (STUB_PAGE << 8)
+binary_search_stage3_late:
+        jp (ix)
+binary_search_stage3_late_end:
+; 0x60 + (STUB_PAGE << 8): +6 T
+binary_search_stage3_early:
+        wait6
+        jp (ix)
+binary_search_stage3_early_end:
+; 0x70 + (STUB_PAGE << 8)
+binary_search_stage4_late:
+        nop
+        jp (ix)
+binary_search_stage4_late_end:
+; 0x78 + (STUB_PAGE << 8): +3 T
+binary_search_stage4_early:
+        ld a, #0x00
+        jp (ix)
+binary_search_stage4_early_end:
+; 0x80 + (STUB_PAGE << 8)
+binary_search_stage5_late:
+        jp (ix)
+binary_search_stage5_late_end:
+; 0x88 + (STUB_PAGE << 8)
+binary_search_stage5_early:
+        jp (iy)
+binary_search_stage5_early_end:
+; 0x90 + (STUB_PAGE << 8)
+binary_search_stage6_late:
+        dec hl
+        jp (ix)
+binary_search_stage6_late_end:
+; 0x98 + (STUB_PAGE << 8): +1 T
+binary_search_stage6_early:
+        cp (hl)
+        jp (ix)
+binary_search_stage6_early_end:
+; 0xA0 + (STUB_PAGE << 8): still in retrace: again
+binary_search_poll1_low:
+        jp (iy)
+binary_search_poll1_low_end:
+; 0xB0 + (STUB_PAGE << 8): retrace ended: go on
+binary_search_poll1_high:
+        jp (ix)
+binary_search_poll1_high_end:
+; 0xC0 + (STUB_PAGE << 8): retrace started: go on
+binary_search_poll2_low:
+        jp (ix)
+binary_search_poll2_low_end:
+; 0xD0 + (STUB_PAGE << 8): not yet: again
+binary_search_poll2_high:
+        jp (iy)
+binary_search_poll2_high_end:

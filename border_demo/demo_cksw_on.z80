@@ -1,0 +1,153 @@
+; HBBS / RUQ demo, CKSW ON.  MZ-800, rear switch in MZ-800 mode.
+;
+; With CKSW on a line is exactly 224 T, so the edges are perfectly straight.
+
+        org 0x2000
+        jp start
+
+        include "../z80asm_version/ruq_mz800_z80asm_cksw_on.z80"
+
+;  delays.  Straight-line code that keeps B, C, D, E, H, L.  (EX twice = no change)
+wait_to_first_sample: macro                     ; 100 T
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        inc iy
+        inc iy
+        nop
+        endm
+
+wait_rest_of_count: macro                       ; 185 T = 224 - 29 - 10 (the JP back)
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        inc iy
+        inc iy
+        ld a, r
+        nop
+        endm
+
+wait_to_first_bar: macro                        ; 48 T
+        ex (sp), hl
+        ex (sp), hl
+        inc iy
+        endm
+
+; one scanline of bars: white, yellow, cyan, each 24 T wide with 24 T of black
+three_bars: macro                               ; 132 T
+        out (c), d                              ; white
+        nop
+        nop
+        nop
+        out (c), e                              ; black
+        nop
+        nop
+        nop
+        out (c), h                              ; yellow
+        nop
+        nop
+        nop
+        out (c), e
+        nop
+        nop
+        nop
+        out (c), l                              ; cyan
+        nop
+        nop
+        nop
+        out (c), e
+        endm
+
+bar_line: macro                                 ; exactly 224 T
+        three_bars
+        ex (sp), hl                             ; 92 T
+        ex (sp), hl
+        ex (sp), hl
+        ex (sp), hl
+        ld a, 0
+        ld a, r
+        endm
+
+five_bar_lines: macro
+        bar_line
+        bar_line
+        bar_line
+        bar_line
+        bar_line
+        endm
+
+start:
+        di
+        in a, (0xE1)                            ; VRAM and character ROM out of the way
+        out (0xE0), a                           ; RAM at 0000h-1FFFh, for the lock's stubs
+        ld sp, 0x7FF0
+        xor a
+        out (0xCE), a                           ; MZ-800 mode, 320x200, 4 colours
+        out (0xF0), a                           ; all 4 palette entries black
+        ld a, 0x10
+        out (0xF0), a
+        ld a, 0x20
+        out (0xF0), a
+        ld a, 0x30
+        out (0xF0), a
+        ld bc, 0x06CF                           ; port 06CFh = border colour
+        xor a
+        out (c), a
+
+        binary_search_init                      ; once: set CKSW, copy the stubs
+
+frame:
+; 1. wait until a new picture starts.  Timing does not matter yet
+        ld bc, 0x00CE                           ; port CEh = video status
+wait_blank:
+        in a, (c)
+        and 0x40                                ; bit 6 = 0: vertical blank
+        jp nz, wait_blank
+wait_picture:
+        in a, (c)
+        and 0x40
+        jp z, wait_picture
+
+; start the lock from a different place every frame, to give it a real job
+        ld a, (frame_number)
+        inc a
+        ld (frame_number), a
+        and 0x3F
+        inc a
+        ld b, a
+move_start:
+        djnz move_start
+
+; 2. LOCK.  From here on every T state counts
+        binary_search_sync
+
+; 3. go down to the bottom border, reading the status once per line
+        ld bc, 0x00CE
+        ld de, 0x0F00                           ; D = white,  E = black
+        ld hl, 0x0E0D                           ; H = yellow, L = cyan
+        wait_to_first_sample
+count_lines:                                    ; once round = 1 line = 224 T
+        in a, (c)
+        and 0x40
+        jp z, bottom_border                     ; JP cc takes 10 T either way
+        wait_rest_of_count
+        jp count_lines
+
+; 4. paint 20 lines of bars
+bottom_border:
+        ld bc, 0x06CF
+        wait_to_first_bar
+        five_bar_lines
+        five_bar_lines
+        five_bar_lines
+        five_bar_lines
+        jp frame
+
+frame_number:
+        defb 0
